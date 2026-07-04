@@ -310,10 +310,7 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
     settings.setBuiltInZoomControls(customSettings.builtInZoomControls);
     settings.setDisplayZoomControls(customSettings.displayZoomControls);
     settings.setSupportMultipleWindows(customSettings.supportMultipleWindows);
-    if (WebViewFeature.isFeatureSupported(
-              WebViewFeature.PAYMENT_REQUEST)) {
-        WebSettingsCompat.setPaymentRequestEnabled(settings, true);
-    }
+
     if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE))
       WebSettingsCompat.setSafeBrowsingEnabled(settings, customSettings.safeBrowsingEnabled);
     else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -588,6 +585,46 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
     setOnLongClickListener(new OnLongClickListener() {
       @Override
       public boolean onLongClick(View v) {
+        // GOTOK FORK: native-driven image context menu. When enabled and the
+        // long-press lands on an <img>, do the heavy lifting natively: resolve
+        // the precise element src + rect via a JS hit-test at the recorded touch
+        // point, bridge it to Dart, and consume the gesture so Android's default
+        // text-selection / context menu never fires. Flutter renders a
+        // Chrome-style context menu with preview anchored at the native rect.
+        if (Boolean.TRUE.equals(customSettings.nativeImageContextMenuEnabled)
+                && javaScriptBridgeEnabled) {
+          int type = getHitTestResult().getType();
+          boolean isImage = type == android.webkit.WebView.HitTestResult.IMAGE_TYPE
+                  || type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE;
+          if (isImage) {
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+            final int touchX = lastTouch.x;
+            final int touchY = lastTouch.y;
+            // Coordinates are translated to CSS pixels (== Flutter logical px at
+            // scale 1) inside JS via window.devicePixelRatio so the rect bubbled
+            // up maps 1:1 to Flutter coordinates relative to the webview widget.
+            String js = "(function(){try{"
+                    + "var dpr=window.devicePixelRatio||1;"
+                    + "var x=" + touchX + "/dpr;var y=" + touchY + "/dpr;"
+                    + "var el=document.elementFromPoint(x,y);var img=null,node=el;"
+                    + "while(node){"
+                    + "if(node.tagName==='IMG'&&(node.currentSrc||node.src)){img=node;break;}"
+                    + "if(node.tagName==='PICTURE'){var inner=node.querySelector('img');"
+                    + "if(inner&&(inner.currentSrc||inner.src)){img=inner;break;}}"
+                    + "node=node.parentElement;}"
+                    + "if(!img){return;}"
+                    + "var r=img.getBoundingClientRect();"
+                    + "if(!window.flutter_inappwebview||!window.flutter_inappwebview.callHandler){return;}"
+                    + "window.flutter_inappwebview.callHandler('onWebImageContextMenu',{"
+                    + "src:(img.currentSrc||img.src),"
+                    + "alt:(img.alt||img.getAttribute('aria-label')||''),"
+                    + "x:r.left,y:r.top,width:r.width,height:r.height});"
+                    + "}catch(e){}})();";
+            evaluateJavascript(js, null);
+            return true;
+          }
+        }
+
         com.pichillilorenzo.flutter_inappwebview_android.types.HitTestResult hitTestResult =
                 com.pichillilorenzo.flutter_inappwebview_android.types.HitTestResult.fromWebViewHitTestResult(getHitTestResult());
         if (channelDelegate != null) channelDelegate.onLongPressHitTestResult(hitTestResult);
@@ -1022,7 +1059,7 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
     if (newSettingsMap.get("fixedFontFamily") != null && !customSettings.fixedFontFamily.equals(newCustomSettings.fixedFontFamily))
       settings.setFixedFontFamily(newCustomSettings.fixedFontFamily);
 
-    if (newSettingsMap.get("forceDark") != null && !customSettings.forceDark.equals(newCustomSettings.forceDark)) {
+    if (newSettingsMap.get("forceDark") != null && !Util.objEquals(customSettings.forceDark, newCustomSettings.forceDark)) {
       if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK))
         WebSettingsCompat.setForceDark(settings, newCustomSettings.forceDark);
       else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
@@ -1030,7 +1067,7 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
     }
 
     if (newSettingsMap.get("forceDarkStrategy") != null &&
-            !customSettings.forceDarkStrategy.equals(newCustomSettings.forceDarkStrategy) &&
+            !Util.objEquals(customSettings.forceDarkStrategy, newCustomSettings.forceDarkStrategy) &&
             WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK_STRATEGY)) {
       try {
         // for some reason the setForceDarkStrategy method could throw a ClassCastException
@@ -1373,15 +1410,17 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
     int currentSize = currentList.getSize();
     int currentIndex = currentList.getCurrentIndex();
 
-    List<HashMap<String, String>> history = new ArrayList<HashMap<String, String>>();
+    List<HashMap<String, Object>> history = new ArrayList<HashMap<String, Object>>();
 
     for (int i = 0; i < currentSize; i++) {
       WebHistoryItem historyItem = currentList.getItemAtIndex(i);
-      HashMap<String, String> historyItemMap = new HashMap<>();
+      HashMap<String, Object> historyItemMap = new HashMap<>();
 
       historyItemMap.put("originalUrl", historyItem.getOriginalUrl());
       historyItemMap.put("title", historyItem.getTitle());
       historyItemMap.put("url", historyItem.getUrl());
+      historyItemMap.put("index", i);
+      historyItemMap.put("offset", i - currentIndex);
 
       history.add(historyItemMap);
     }
