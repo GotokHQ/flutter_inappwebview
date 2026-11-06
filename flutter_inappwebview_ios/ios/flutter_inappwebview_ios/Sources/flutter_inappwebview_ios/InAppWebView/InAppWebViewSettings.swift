@@ -73,9 +73,8 @@ public class InAppWebViewSettings: ISettings<InAppWebView> {
     var applePayAPIEnabled = false
     var allowingReadAccessTo: String? = nil
     var disableLongPressContextMenuOnLinks = false
-    // GOTOK FORK: when true, long-pressing an <img> shows a native
-    // UIContextMenuConfiguration (Chrome-on-WKWebView style) and the
-    // selected action is bridged to Dart via callHandler('onWebImageAction').
+    // GOTOK FORK: when true, image long-press is detected natively and the
+    // pressed image payload is bridged to Dart for a Flutter-rendered preview.
     var nativeImageContextMenuEnabled = false
     var disableInputAccessoryView = false
     var underPageBackgroundColor: String?

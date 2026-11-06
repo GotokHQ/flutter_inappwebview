@@ -750,6 +750,12 @@ public class WebViewChannelDelegate extends ChannelDelegateImpl {
     channel.invokeMethod("onLongPressHitTestResult", hitTestResult.toMap());
   }
 
+  public void onWebImageContextMenu(Map<String, Object> obj) {
+    MethodChannel channel = getChannel();
+    if (channel == null) return;
+    channel.invokeMethod("onWebImageContextMenu", obj);
+  }
+
   public void onScrollChanged(int x, int y) {
     MethodChannel channel = getChannel();
     if (channel == null) return;

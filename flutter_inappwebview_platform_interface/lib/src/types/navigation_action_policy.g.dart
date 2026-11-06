@@ -29,11 +29,33 @@ class NavigationActionPolicy {
   ///**NOTE**: available only on iOS 14.5+. It will fallback to [CANCEL].
   static const DOWNLOAD = NavigationActionPolicy._internal(2, 2);
 
+  ///GOTOK FORK: Allow the navigation to continue, but without letting WebKit
+  ///try to open the URL as a Universal Link / app link. On iOS/macOS this maps
+  ///to the stable WebKit policy `_WKNavigationActionPolicyAllowWithoutTryingAppLink`
+  ///(`WKNavigationActionPolicy.allow + 2`), which is what full browsers (Firefox,
+  ///Brave) use to keep navigation in the webview instead of launching the
+  ///installed native app. On all other platforms it falls back to [ALLOW].
+  static final ALLOW_WITHOUT_TRYING_APP_LINK =
+      NavigationActionPolicy._internalMultiPlatform(3, () {
+        switch (defaultTargetPlatform) {
+          case TargetPlatform.iOS:
+            return 3;
+          case TargetPlatform.macOS:
+            return 3;
+          default:
+            break;
+        }
+        // Fall back to the plain ALLOW native value everywhere else; app
+        // links are a WebKit-only concept.
+        return 1;
+      });
+
   ///Set of all values of [NavigationActionPolicy].
   static final Set<NavigationActionPolicy> values = [
     NavigationActionPolicy.ALLOW,
     NavigationActionPolicy.CANCEL,
     NavigationActionPolicy.DOWNLOAD,
+    NavigationActionPolicy.ALLOW_WITHOUT_TRYING_APP_LINK,
   ].toSet();
 
   ///Gets a possible [NavigationActionPolicy] instance from [int] value.
@@ -110,6 +132,8 @@ class NavigationActionPolicy {
         return 'CANCEL';
       case 2:
         return 'DOWNLOAD';
+      case 3:
+        return 'ALLOW_WITHOUT_TRYING_APP_LINK';
     }
     return _value.toString();
   }

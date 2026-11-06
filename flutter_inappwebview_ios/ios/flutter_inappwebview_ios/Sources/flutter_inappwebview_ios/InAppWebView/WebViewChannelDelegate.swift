@@ -725,6 +725,10 @@ public class WebViewChannelDelegate: ChannelDelegate {
         channel?.invokeMethod("onLongPressHitTestResult", arguments: hitTestResult.toMap())
     }
     
+    public func onWebImageContextMenu(arguments: [String: Any?]) {
+        channel?.invokeMethod("onWebImageContextMenu", arguments: arguments)
+    }
+    
     public func onScrollChanged(x: Int, y: Int) {
         let arguments: [String: Any?] = ["x": x, "y": y]
         channel?.invokeMethod("onScrollChanged", arguments: arguments)

@@ -529,10 +529,10 @@ class InAppWebViewSettings {
   bool? disableLongPressContextMenuOnLinks;
 
   ///GOTOK FORK: Set to `true` to enable native-driven image long-press handling.
-  ///On iOS this shows a native (Chrome-on-WKWebView style) context menu and the
-  ///selected action is delivered to Dart through the JS handler `onWebImageAction`.
+  ///On iOS the long-press is detected by a native `UILongPressGestureRecognizer`
+  ///and the pressed image payload is delivered to Dart through `onWebImageContextMenu`.
   ///On Android the long-press on an `<img>` is detected natively and the element
-  ///src + rect are bridged to Dart through the JS handler `onWebImageContextMenu`.
+  ///src + rect are bridged to Dart through `onWebImageContextMenu`.
   ///The default value is `false`.
   ///
   ///**Officially Supported Platforms/Implementations**:

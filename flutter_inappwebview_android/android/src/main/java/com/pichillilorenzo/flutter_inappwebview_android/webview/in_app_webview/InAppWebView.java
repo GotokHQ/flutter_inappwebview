@@ -103,6 +103,7 @@ import com.pichillilorenzo.flutter_inappwebview_android.webview.web_message.WebM
 import com.pichillilorenzo.flutter_inappwebview_android.webview.web_message.WebMessageListener;
 
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -592,37 +593,148 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
         // text-selection / context menu never fires. Flutter renders a
         // Chrome-style context menu with preview anchored at the native rect.
         if (Boolean.TRUE.equals(customSettings.nativeImageContextMenuEnabled)
-                && javaScriptBridgeEnabled) {
-          int type = getHitTestResult().getType();
-          boolean isImage = type == android.webkit.WebView.HitTestResult.IMAGE_TYPE
-                  || type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE;
-          if (isImage) {
-            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
-            final int touchX = lastTouch.x;
-            final int touchY = lastTouch.y;
-            // Coordinates are translated to CSS pixels (== Flutter logical px at
-            // scale 1) inside JS via window.devicePixelRatio so the rect bubbled
-            // up maps 1:1 to Flutter coordinates relative to the webview widget.
-            String js = "(function(){try{"
-                    + "var dpr=window.devicePixelRatio||1;"
-                    + "var x=" + touchX + "/dpr;var y=" + touchY + "/dpr;"
-                    + "var el=document.elementFromPoint(x,y);var img=null,node=el;"
-                    + "while(node){"
-                    + "if(node.tagName==='IMG'&&(node.currentSrc||node.src)){img=node;break;}"
-                    + "if(node.tagName==='PICTURE'){var inner=node.querySelector('img');"
-                    + "if(inner&&(inner.currentSrc||inner.src)){img=inner;break;}}"
-                    + "node=node.parentElement;}"
-                    + "if(!img){return;}"
-                    + "var r=img.getBoundingClientRect();"
-                    + "if(!window.flutter_inappwebview||!window.flutter_inappwebview.callHandler){return;}"
-                    + "window.flutter_inappwebview.callHandler('onWebImageContextMenu',{"
-                    + "src:(img.currentSrc||img.src),"
-                    + "alt:(img.alt||img.getAttribute('aria-label')||''),"
-                    + "x:r.left,y:r.top,width:r.width,height:r.height});"
-                    + "}catch(e){}})();";
-            evaluateJavascript(js, null);
-            return true;
-          }
+                && javaScriptBridgeEnabled
+                // Keep long-press functional inside editable fields (paste menu).
+                && getHitTestResult().getType() != android.webkit.WebView.HitTestResult.EDIT_TEXT_TYPE) {
+          final int touchX = lastTouch.x;
+          final int touchY = lastTouch.y;
+          // Coordinates are translated to CSS pixels (== Flutter logical px at
+          // scale 1) inside JS via window.devicePixelRatio so the rect bubbled
+          // up maps 1:1 to Flutter coordinates relative to the webview widget.
+          //
+          // The hit-test walks the full element stack under the touch
+          // (elementsFromPoint) so images covered by transparent carousel /
+          // tracking overlays are still found, resolves the best-known source
+          // for lazy-loaded and responsive images, and falls back to CSS
+          // background-image product shots.
+          // Spec-style srcset parse: a URL is a run of non-whitespace (it may
+          // contain commas, e.g. Cloudinary transformations), so entries can
+          // only be split on the comma that follows a descriptor/whitespace.
+          String js = "(function(){try{"
+                  + "function parseSrcset(ss){var out=[];if(!ss)return out;"
+                  + "var i=0,n=ss.length;"
+                  + "while(i<n){"
+                  + "while(i<n&&/[\\s,]/.test(ss[i]))i++;"
+                  + "if(i>=n)break;"
+                  + "var start=i;"
+                  + "while(i<n&&!/\\s/.test(ss[i]))i++;"
+                  + "var raw=ss.slice(start,i);"
+                  + "var url=raw.replace(/,+$/,'');"
+                  + "var desc='';"
+                  + "if(url&&raw.slice(-1)!==','){"
+                  + "while(i<n&&/\\s/.test(ss[i]))i++;"
+                  + "var d=i;"
+                  + "while(i<n&&ss[i]!==',')i++;"
+                  + "desc=ss.slice(d,i).trim();i++;}"
+                  + "if(url)out.push([url,desc]);}"
+                  + "return out;}"
+                  + "function bestFromSrcset(ss){var entries=parseSrcset(ss);"
+                  + "var url='',score=0;"
+                  + "for(var i=0;i<entries.length;i++){var d=entries[i][1];"
+                  + "var s=/w$/.test(d)?parseInt(d,10):(/x$/.test(d)?parseFloat(d)*1000:1);"
+                  + "if(s>score){url=entries[i][0];score=s;}}"
+                  + "return url;}"
+                  + "function fromDynamicImage(attr){if(!attr)return '';"
+                  + "try{var map=JSON.parse(attr),url='',best=0;"
+                  + "for(var k in map){var dims=map[k];if(!dims||!dims.length)continue;"
+                  + "var area=(Number(dims[0])||0)*(Number(dims[1])||0);"
+                  + "if(area>=best){best=area;url=k;}}"
+                  + "return url;}catch(e){return '';}}"
+                  + "function srcOf(img){if(!img)return '';"
+                  + "return img.getAttribute('data-old-hires')||"
+                  + "fromDynamicImage(img.getAttribute('data-a-dynamic-image'))||"
+                  + "img.getAttribute('data-zoom-image')||"
+                  + "img.getAttribute('data-large_image')||"
+                  + "img.getAttribute('data-large-image')||"
+                  + "bestFromSrcset(img.getAttribute('srcset')||img.getAttribute('data-srcset'))||"
+                  + "img.currentSrc||"
+                  + "img.getAttribute('data-src')||"
+                  + "img.getAttribute('data-original')||"
+                  + "img.src||'';}"
+                  + "function bgOf(node){try{"
+                  + "if(!node||node.nodeType!==1)return '';"
+                  + "var bi=window.getComputedStyle(node).backgroundImage||'';"
+                  + "var m=bi.match(/url\\((['\\\"]?)([^'\\\")]+)\\1\\)/);"
+                  + "if(!m||!m[2])return '';"
+                  + "return m[2].indexOf('data:')===0?'':m[2];}catch(e){return '';}}"
+                  + "var dpr=window.devicePixelRatio||1;"
+                  + "var x=" + touchX + "/dpr;var y=" + touchY + "/dpr;"
+                  + "var els=document.elementsFromPoint?document.elementsFromPoint(x,y):[document.elementFromPoint(x,y)];"
+                  + "var img=null,bgNode=null,bgSrc='';"
+                  + "for(var i=0;i<els.length&&!img;i++){var node=els[i];"
+                  + "while(node&&node!==document.documentElement){"
+                  + "if(node.tagName==='IMG'&&srcOf(node)){img=node;break;}"
+                  + "if(node.tagName==='PICTURE'){var inner=node.querySelector('img');"
+                  + "if(inner&&srcOf(inner)){img=inner;break;}}"
+                  + "if(!bgSrc){var bg=bgOf(node);"
+                  + "if(bg){var br=node.getBoundingClientRect();"
+                  + "if(br.width>=40&&br.height>=40){bgSrc=bg;bgNode=node;}}}"
+                  + "node=node.parentElement;}}"
+                  // Some sites (e.g. Facebook Marketplace) set pointer-events:none
+                  // on the product <img>, so it never appears in elementsFromPoint
+                  // and the ancestor walk can't reach it (it's a descendant of the
+                  // hit element). Scan descendants of the hit chain, then the whole
+                  // document, for a visible image whose rect contains the point.
+                  + "if(!img){"
+                  + "function visibleRectOf(el){var r=el.getBoundingClientRect();"
+                  + "if(!r||r.width<40||r.height<40)return null;"
+                  + "if(r.bottom<=0||r.right<=0||r.top>=window.innerHeight||r.left>=window.innerWidth)return null;"
+                  + "var st=window.getComputedStyle?window.getComputedStyle(el):null;"
+                  + "if(st&&(st.visibility==='hidden'||st.display==='none'||Number(st.opacity||1)===0))return null;"
+                  + "return r;}"
+                  + "var best=null,bestArea=0;"
+                  + "function consider(cand){if(!srcOf(cand))return;"
+                  + "var r=visibleRectOf(cand);if(!r)return;"
+                  + "if(x<r.left||x>r.right||y<r.top||y>r.bottom)return;"
+                  + "var area=r.width*r.height;"
+                  + "if(area>bestArea){best=cand;bestArea=area;}}"
+                  + "for(var i=0;i<els.length&&!best;i++){var el=els[i];"
+                  + "if(!el||!el.querySelectorAll)continue;"
+                  + "var imgs=el.querySelectorAll('img');"
+                  + "for(var j=0;j<imgs.length;j++)consider(imgs[j]);}"
+                  + "if(!best){var all=document.images||[];"
+                  + "for(var j=0;j<all.length;j++)consider(all[j]);}"
+                  + "img=best;}"
+                  + "var target=img||bgNode;"
+                  + "var src=img?srcOf(img):bgSrc;"
+                  + "if(!target||!src){return null;}"
+                  + "var r=target.getBoundingClientRect();"
+                  + "return JSON.stringify({"
+                  + "src:src,"
+                  + "alt:(target.alt||target.getAttribute('aria-label')||''),"
+                  + "x:r.left,y:r.top,width:r.width,height:r.height});"
+                  + "}catch(e){return null;}})();";
+          evaluateJavascript(js, value -> {
+            if (value == null || "null".equals(value) || channelDelegate == null) return;
+            try {
+              Object decoded = new JSONTokener(value).nextValue();
+              JSONObject json = decoded instanceof JSONObject
+                      ? (JSONObject) decoded
+                      : new JSONObject((String) decoded);
+              String src = json.optString("src", "");
+              if (src.isEmpty()) return;
+              performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+              Map<String, Object> obj = new HashMap<>();
+              obj.put("src", src);
+              obj.put("alt", json.optString("alt", ""));
+              obj.put("x", json.optDouble("x", 0));
+              obj.put("y", json.optDouble("y", 0));
+              obj.put("width", json.optDouble("width", 0));
+              obj.put("height", json.optDouble("height", 0));
+              channelDelegate.onWebImageContextMenu(obj);
+            } catch (Exception ignored) {}
+          });
+          // Always consume the long-press in picker mode so the page's own
+          // long-press UI and Android's default image/text menus can never win.
+          // Dispatch ACTION_CANCEL so the page receives `touchcancel` and any
+          // JS long-press timers the site started (custom overlays, "not
+          // interested" dialogs, drag handlers) are aborted immediately.
+          long now = android.os.SystemClock.uptimeMillis();
+          MotionEvent cancelEvent = MotionEvent.obtain(now, now,
+                  MotionEvent.ACTION_CANCEL, touchX, touchY, 0);
+          InAppWebView.this.dispatchTouchEvent(cancelEvent);
+          cancelEvent.recycle();
+          return true;
         }
 
         com.pichillilorenzo.flutter_inappwebview_android.types.HitTestResult hitTestResult =

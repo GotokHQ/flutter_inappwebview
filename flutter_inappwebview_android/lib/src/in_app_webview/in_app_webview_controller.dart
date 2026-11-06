@@ -1342,6 +1342,9 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
             _inAppBrowserEventHandler!.onLongPressHitTestResult(hitTestResult);
         }
         break;
+      case "onWebImageContextMenu":
+        await _dispatchNativeWebImageContextMenu(call.arguments);
+        break;
       case "onCreateContextMenu":
         ContextMenu? contextMenu;
         if (webviewParams != null && webviewParams!.contextMenu != null) {
@@ -1801,6 +1804,41 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
         throw UnimplementedError("Unimplemented ${call.method} method");
     }
     return null;
+  }
+
+  Future<void> _dispatchNativeWebImageContextMenu(dynamic arguments) async {
+    const handlerName = "onWebImageContextMenu";
+    final handler = _javaScriptHandlersMap[handlerName];
+    if (handler == null) {
+      return;
+    }
+
+    final data = arguments is Map
+        ? arguments.cast<String, dynamic>()
+        : <String, dynamic>{};
+    final args = <dynamic>[data];
+
+    try {
+      if (handler is JavaScriptHandlerCallback) {
+        await handler(args);
+      } else if (handler is JavaScriptHandlerFunction) {
+        await handler(
+          JavaScriptHandlerFunctionData(
+            args: args,
+            isMainFrame: true,
+            origin: WebUri("native://flutter_inappwebview"),
+            requestUrl: WebUri("native://flutter_inappwebview"),
+          ),
+        );
+      } else {
+        await Function.apply(handler, [args]);
+      }
+    } catch (error, stacktrace) {
+      developer.log(
+        error.toString() + '\n' + stacktrace.toString(),
+        name: 'Native Web Image Context Menu "$handlerName"',
+      );
+    }
   }
 
   @override

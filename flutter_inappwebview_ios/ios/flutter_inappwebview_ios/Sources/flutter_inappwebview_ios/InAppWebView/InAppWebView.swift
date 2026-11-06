@@ -8,6 +8,103 @@
 import Flutter
 import Foundation
 @preconcurrency import WebKit
+import UIKit.UIGestureRecognizerSubclass
+
+// GOTOK FORK: long-press detection that never enters the UIKit gesture arena.
+//
+// WKWebView installs internal "deferring" gesture recognizers that hold every
+// other recognizer's state transition hostage until the page's JS touch
+// handlers have run (that's how sites get the chance to preventDefault). On
+// script-heavy storefronts this gate delays a UILongPressGestureRecognizer's
+// `.began` by up to seconds. UIKit, however, delivers *raw* touches to every
+// attached recognizer immediately — only state transitions are gated. This
+// observer therefore stays in `.possible` forever and drives its own timer
+// off raw touch delivery, so neither WebKit nor page JS can delay or block it.
+class NativeImageLongPressObserver: UIGestureRecognizer {
+    var pressDuration: TimeInterval = 0.45
+    var allowableMovement: CGFloat = 10.0
+    /// Called with the touch location in window coordinates.
+    var onLongPress: ((CGPoint) -> Void)?
+
+    private var timer: Timer?
+    private var activeTouches = Set<UITouch>()
+    private var initialWindowLocation: CGPoint = .zero
+    private var lastWindowLocation: CGPoint = .zero
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        activeTouches.formUnion(touches)
+        guard activeTouches.count == 1, let touch = activeTouches.first else {
+            // A second finger means pinch/zoom, not a long-press.
+            cancelTimer()
+            return
+        }
+        initialWindowLocation = touch.location(in: nil)
+        lastWindowLocation = initialWindowLocation
+        cancelTimer()
+        let timer = Timer(timeInterval: pressDuration, repeats: false) { [weak self] _ in
+            self?.timerFired()
+        }
+        // .common so the timer still fires while the scroll view is tracking.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        guard timer != nil, let touch = activeTouches.first else { return }
+        lastWindowLocation = touch.location(in: nil)
+        let dx = lastWindowLocation.x - initialWindowLocation.x
+        let dy = lastWindowLocation.y - initialWindowLocation.y
+        if (dx * dx + dy * dy) > allowableMovement * allowableMovement {
+            cancelTimer()
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        activeTouches.subtract(touches)
+        if activeTouches.isEmpty {
+            cancelTimer()
+            state = .failed
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        activeTouches.subtract(touches)
+        if activeTouches.isEmpty {
+            cancelTimer()
+            state = .failed
+        }
+    }
+
+    override func reset() {
+        super.reset()
+        activeTouches.removeAll()
+        cancelTimer()
+    }
+
+    // Never recognizes, so it can neither prevent others nor be silenced by
+    // WebKit's recognizers recognizing first.
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return false
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return false
+    }
+
+    private func timerFired() {
+        cancelTimer()
+        onLongPress?(lastWindowLocation)
+    }
+
+    private func cancelTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
 
 public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                             WKNavigationDelegate, WKScriptMessageHandler, UIGestureRecognizerDelegate,
@@ -49,8 +146,10 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     // https://github.com/mozilla-mobile/firefox-ios/blob/50531a7e9e4d459fb11d4fcb7d4322e08103501f/Client/Frontend/Browser/ContextMenuHelper.swift
     fileprivate var nativeHighlightLongPressRecognizer: UILongPressGestureRecognizer?
     fileprivate var nativeLoupeGesture: UILongPressGestureRecognizer?
+    fileprivate var nativeWebKitLongPressRecognizer: UILongPressGestureRecognizer?
     var longPressRecognizer: UILongPressGestureRecognizer!
     var recognizerForDisablingContextMenuOnLinks: UILongPressGestureRecognizer!
+    var nativeImageLongPressRecognizer: NativeImageLongPressObserver!
     var lastLongPressTouchPoint: CGPoint?
     
     var panGestureRecognizer: UIPanGestureRecognizer!
@@ -61,10 +160,8 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     var contextMenuIsShowing = false
     // flag used for the workaround to trigger onCreateContextMenu event as the same on Android
     var onCreateContextMenuEventTriggeredWhenMenuDisabled = false
-    // GOTOK FORK: src of the image the native context menu was opened on.
+    // GOTOK FORK: legacy WebKit context-menu fallback state.
     var nativeImageContextMenuSrc: String?
-    // GOTOK FORK: viewport CSS rect of that image, used to lift the image
-    // itself when the element is a link (instead of WebKit's link preview).
     var nativeImageContextMenuCssRect: CGRect?
     
     var customIMPs: [IMP] = []
@@ -100,6 +197,11 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         recognizerForDisablingContextMenuOnLinks.delegate = self
         recognizerForDisablingContextMenuOnLinks.addTarget(self, action: #selector(longPressGestureDetected))
         recognizerForDisablingContextMenuOnLinks?.minimumPressDuration = 0.45
+        nativeImageLongPressRecognizer = NativeImageLongPressObserver()
+        nativeImageLongPressRecognizer.onLongPress = { [weak self] windowPoint in
+            self?.nativeImageLongPressFired(at: windowPoint)
+        }
+        nativeImageLongPressRecognizer.isEnabled = false
         panGestureRecognizer = UIPanGestureRecognizer()
         panGestureRecognizer.delegate = self
         panGestureRecognizer.addTarget(self, action: #selector(endDraggingDetected))
@@ -163,13 +265,22 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     // As of iOS 12, WKContentView gesture setup is async, but it has been called by the time
     // the webview is ready to load an URL. After this has happened, we can override the gesture.
     func replaceGestureHandlerIfNeeded() {
-        // GOTOK FORK: keep WebKit's native long-press / context-menu interaction
-        // intact when the native image context menu is enabled, otherwise the
-        // hijack below suppresses contextMenuConfigurationForElement.
+        nativeImageLongPressRecognizer.isEnabled = settings?.nativeImageContextMenuEnabled == true
         if settings?.nativeImageContextMenuEnabled == true {
+            DispatchQueue.main.async {
+                self.nativeHighlightLongPressRecognizer = self.gestureRecognizerWithDescriptionFragment("action=_highlightLongPressRecognized:")
+                self.nativeLoupeGesture = self.gestureRecognizerWithDescriptionFragment("action=loupeGesture:")
+                self.nativeWebKitLongPressRecognizer = self.gestureRecognizerWithDescriptionFragment("action=_longPressRecognized:")
+                // Picker mode owns image long-press natively. Disable WebKit's
+                // competing context-menu recognizer so page/link preview behavior
+                // cannot win before Flutter receives the image rect.
+                self.nativeWebKitLongPressRecognizer?.isEnabled = false
+                self.removeImageAnalysisInteractionsFromContentView()
+            }
             return
         }
         DispatchQueue.main.async {
+            self.nativeWebKitLongPressRecognizer?.isEnabled = true
             if self.gestureRecognizerWithDescriptionFragment("InAppWebView") == nil {
                 self.replaceWebViewLongPress()
             }
@@ -193,6 +304,44 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             return (($0 as? UILongPressGestureRecognizer) != nil) && $0.description.contains(descriptionFragment)
         })
         return result as? UILongPressGestureRecognizer
+    }
+
+    /// Force-cancels WebKit's DOM touch pipeline (UIWebTouchEventsGestureRecognizer)
+    /// so the page receives `touchcancel` and aborts any JS long-press timers.
+    private func cancelWebTouchEventsRecognizer() {
+        let recognizers = self.scrollView.subviews.compactMap({ $0.gestureRecognizers }).joined()
+        for recognizer in recognizers where recognizer.description.contains("UIWebTouchEventsGestureRecognizer") {
+            if recognizer.isEnabled {
+                recognizer.isEnabled = false
+                recognizer.isEnabled = true
+            }
+        }
+    }
+
+    private func removeImageAnalysisInteractionsFromContentView() {
+        scrollView.subviews.forEach { removeImageAnalysisInteractions(from: $0) }
+    }
+
+    private func removeImageAnalysisInteractions(from view: UIView) {
+        for interaction in view.interactions {
+            let typeName = String(describing: type(of: interaction))
+            if isImageAnalysisIdentifier(typeName) {
+                view.removeInteraction(interaction)
+            }
+        }
+
+        view.gestureRecognizers?.forEach { gestureRecognizer in
+            if isImageAnalysisIdentifier(gestureRecognizer.description) {
+                gestureRecognizer.isEnabled = false
+            }
+        }
+
+        view.subviews.forEach { removeImageAnalysisInteractions(from: $0) }
+    }
+
+    private func isImageAnalysisIdentifier(_ value: String) -> Bool {
+        return value.range(of: "ImageAnalysis", options: .caseInsensitive) != nil ||
+            value.range(of: "VKC", options: .caseInsensitive) != nil
     }
     
     @objc func longPressGestureDetected(_ sender: UIGestureRecognizer) {
@@ -248,6 +397,243 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                 self.channelDelegate?.onLongPressHitTestResult(hitTestResult: HitTestResult(type: .unknownType, extra: nil))
             }
         })
+    }
+    
+    func nativeImageLongPressFired(at windowPoint: CGPoint) {
+        guard settings?.nativeImageContextMenuEnabled == true,
+              configuration.preferences.javaScriptEnabled else {
+            return
+        }
+
+        // WebKit re-installs its long-press recognizer and VisionKit image
+        // analysis interactions after navigations/content-process swaps, so the
+        // one-time cleanup in `replaceGestureHandlerIfNeeded` can go stale and
+        // the system image menu (Share / Save to Photos / Copy Subject) races
+        // this recognizer. Re-strip them at press time before handling.
+        nativeWebKitLongPressRecognizer = gestureRecognizerWithDescriptionFragment("action=_longPressRecognized:")
+        nativeWebKitLongPressRecognizer?.isEnabled = false
+        removeImageAnalysisInteractionsFromContentView()
+
+        if nativeHighlightLongPressRecognizer?.isEnabled == true {
+            nativeHighlightLongPressRecognizer?.isEnabled = false
+            nativeHighlightLongPressRecognizer?.isEnabled = true
+        }
+        if nativeLoupeGesture?.isEnabled == true {
+            nativeLoupeGesture?.isEnabled = false
+            nativeLoupeGesture?.isEnabled = true
+        }
+
+        // `cancelsTouchesInView` only cancels UIView touch delivery; WebKit
+        // feeds DOM touch events through its own UIWebTouchEventsGestureRecognizer,
+        // so the page's JS long-press timers (e.g. SHEIN's "not interested"
+        // sheet) keep running. Bounce that recognizer so the page receives
+        // `touchcancel` the moment our gesture wins.
+        cancelWebTouchEventsRecognizer()
+
+        let touchPoint = convert(windowPoint, from: nil)
+        lastTouchPoint = touchPoint
+        lastLongPressTouchPoint = touchPoint
+
+        let zoom = max(scrollView.zoomScale, 0.01)
+        let viewportX = (touchPoint.x - scrollView.contentInset.left) / zoom
+        let viewportY = (touchPoint.y - scrollView.contentInset.top) / zoom
+        // Hit-test walks every element under the touch (transparent carousel
+        // overlays included), resolves the best-known source for lazy-loaded /
+        // responsive images, and falls back to CSS background-image product
+        // shots so the picker works across storefront implementations.
+        let js = #"""
+        (function(){
+          try {
+            // Spec-style srcset parse: a URL is a run of non-whitespace (it may
+            // contain commas, e.g. Cloudinary transformations), so entries can
+            // only be split on the comma that follows a descriptor/whitespace.
+            function parseSrcset(ss) {
+              var out = [];
+              if (!ss) return out;
+              var i = 0, n = ss.length;
+              while (i < n) {
+                while (i < n && /[\s,]/.test(ss[i])) i++;
+                if (i >= n) break;
+                var start = i;
+                while (i < n && !/\s/.test(ss[i])) i++;
+                var url = ss.slice(start, i).replace(/,+$/, '');
+                var desc = '';
+                if (url && ss.slice(start, i).slice(-1) !== ',') {
+                  while (i < n && /\s/.test(ss[i])) i++;
+                  var d = i;
+                  while (i < n && ss[i] !== ',') i++;
+                  desc = ss.slice(d, i).trim();
+                  i++;
+                }
+                if (url) out.push([url, desc]);
+              }
+              return out;
+            }
+            function bestFromSrcset(ss) {
+              var entries = parseSrcset(ss);
+              var url = '', score = 0;
+              for (var i = 0; i < entries.length; i++) {
+                var d = entries[i][1];
+                var s = /w$/.test(d) ? parseInt(d, 10) : (/x$/.test(d) ? parseFloat(d) * 1000 : 1);
+                if (s > score) { url = entries[i][0]; score = s; }
+              }
+              return url;
+            }
+            function fromDynamicImage(attr) {
+              if (!attr) return '';
+              try {
+                var map = JSON.parse(attr), url = '', best = 0;
+                for (var k in map) {
+                  var dims = map[k];
+                  if (!dims || !dims.length) continue;
+                  var area = (Number(dims[0]) || 0) * (Number(dims[1]) || 0);
+                  if (area >= best) { best = area; url = k; }
+                }
+                return url;
+              } catch (e) { return ''; }
+            }
+            function srcOf(img) {
+              if (!img) return '';
+              return img.getAttribute('data-old-hires') ||
+                fromDynamicImage(img.getAttribute('data-a-dynamic-image')) ||
+                img.getAttribute('data-zoom-image') ||
+                img.getAttribute('data-large_image') ||
+                img.getAttribute('data-large-image') ||
+                bestFromSrcset(img.getAttribute('srcset') || img.getAttribute('data-srcset')) ||
+                img.currentSrc ||
+                img.getAttribute('data-src') ||
+                img.getAttribute('data-original') ||
+                img.src || '';
+            }
+            function bgOf(node) {
+              try {
+                if (!node || node.nodeType !== 1) return '';
+                var bi = window.getComputedStyle(node).backgroundImage || '';
+                var m = bi.match(/url\((['"]?)([^'")]+)\1\)/);
+                if (!m || !m[2]) return '';
+                return m[2].indexOf('data:') === 0 ? '' : m[2];
+              } catch (e) { return ''; }
+            }
+            var x = \#(viewportX), y = \#(viewportY);
+            var els = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [document.elementFromPoint(x, y)];
+            var img = null, bgNode = null, bgSrc = '';
+            for (var i = 0; i < els.length && !img; i++) {
+              var node = els[i];
+              while (node && node !== document.documentElement) {
+                if (node.tagName === 'IMG' && srcOf(node)) { img = node; break; }
+                if (node.tagName === 'PICTURE') {
+                  var inner = node.querySelector('img');
+                  if (inner && srcOf(inner)) { img = inner; break; }
+                }
+                if (!bgSrc) {
+                  var bg = bgOf(node);
+                  if (bg) {
+                    var br = node.getBoundingClientRect();
+                    if (br.width >= 40 && br.height >= 40) { bgSrc = bg; bgNode = node; }
+                  }
+                }
+                node = node.parentElement;
+              }
+            }
+            // Some sites (e.g. Facebook Marketplace) set pointer-events:none on
+            // the product <img>, so it never appears in elementsFromPoint and
+            // the ancestor walk above can't reach it (it's a descendant of the
+            // hit element). Scan descendants of the hit chain, then the whole
+            // document, for a visible image whose rect contains the point.
+            if (!img) {
+              function visibleRectOf(el) {
+                var r = el.getBoundingClientRect();
+                if (!r || r.width < 40 || r.height < 40) return null;
+                if (r.bottom <= 0 || r.right <= 0 ||
+                    r.top >= window.innerHeight || r.left >= window.innerWidth) return null;
+                var st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+                if (st && (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity || 1) === 0)) return null;
+                return r;
+              }
+              var best = null, bestArea = 0;
+              function consider(cand) {
+                if (!srcOf(cand)) return;
+                var r = visibleRectOf(cand);
+                if (!r) return;
+                if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+                var area = r.width * r.height;
+                if (area > bestArea) { best = cand; bestArea = area; }
+              }
+              for (var i = 0; i < els.length && !best; i++) {
+                var el = els[i];
+                if (!el || !el.querySelectorAll) continue;
+                var imgs = el.querySelectorAll('img');
+                for (var j = 0; j < imgs.length; j++) consider(imgs[j]);
+              }
+              if (!best) {
+                var all = document.images || [];
+                for (var j = 0; j < all.length; j++) consider(all[j]);
+              }
+              img = best;
+            }
+            var target = img || bgNode;
+            var src = img ? srcOf(img) : bgSrc;
+            if (!target || !src) { return JSON.stringify({ src: null }); }
+            var r = target.getBoundingClientRect();
+            return JSON.stringify({
+              src: src,
+              alt: (target.alt || target.getAttribute('aria-label') || ''),
+              x: r.left, y: r.top, width: r.width, height: r.height
+            });
+          } catch (e) { return JSON.stringify({ src: null }); }
+        })()
+        """#
+
+        evaluateJavaScript(js) { [weak self] value, _ in
+            guard let self = self,
+                  let hit = self.parseNativeImageHitTestResult(value) else {
+                return
+            }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            self.sendNativeWebImageContextMenu(src: hit.src, alt: hit.alt, cssRect: hit.cssRect)
+        }
+    }
+    
+    private func parseNativeImageHitTestResult(_ value: Any?) -> (src: String, alt: String, cssRect: CGRect)? {
+        guard let str = value as? String,
+              let data = str.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let src = obj["src"] as? String,
+              !src.isEmpty else {
+            return nil
+        }
+        let x = obj["x"] as? Double ?? 0
+        let y = obj["y"] as? Double ?? 0
+        let width = obj["width"] as? Double ?? 0
+        let height = obj["height"] as? Double ?? 0
+        guard width > 0, height > 0 else {
+            return nil
+        }
+        return (
+            src: src,
+            alt: obj["alt"] as? String ?? "",
+            cssRect: CGRect(x: x, y: y, width: width, height: height)
+        )
+    }
+    
+    private func sendNativeWebImageContextMenu(src: String, alt: String, cssRect: CGRect) {
+        let zoom = max(scrollView.zoomScale, 0.01)
+        let viewRect = CGRect(
+            x: cssRect.origin.x * zoom + scrollView.contentInset.left,
+            y: cssRect.origin.y * zoom + scrollView.contentInset.top,
+            width: cssRect.width * zoom,
+            height: cssRect.height * zoom
+        )
+        let clippedRect = viewRect.intersection(bounds)
+        let rect = clippedRect.isEmpty ? viewRect : clippedRect
+        channelDelegate?.onWebImageContextMenu(arguments: [
+            "src": src,
+            "alt": alt,
+            "x": Double(rect.origin.x),
+            "y": Double(rect.origin.y),
+            "width": Double(rect.width),
+            "height": Double(rect.height)
+        ])
     }
     
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -398,7 +784,9 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         
         scrollView.addGestureRecognizer(self.longPressRecognizer)
         scrollView.addGestureRecognizer(self.recognizerForDisablingContextMenuOnLinks)
+        scrollView.addGestureRecognizer(self.nativeImageLongPressRecognizer)
         scrollView.addGestureRecognizer(self.panGestureRecognizer)
+        replaceGestureHandlerIfNeeded()
         scrollView.addObserver(self, forKeyPath: #keyPath(UIScrollView.contentOffset), options: [.new, .old], context: nil)
         scrollView.addObserver(self, forKeyPath: #keyPath(UIScrollView.zoomScale), options: [.new, .old], context: nil)
         scrollView.addObserver(self, forKeyPath: #keyPath(UIScrollView.contentSize), options: [.new, .old], context: nil)
@@ -1430,6 +1818,9 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         scrollView.isScrollEnabled = !(newSettings.disableVerticalScroll && newSettings.disableHorizontalScroll)
         
         self.settings = newSettings
+        if newSettingsMap["nativeImageContextMenuEnabled"] != nil {
+            replaceGestureHandlerIfNeeded()
+        }
     }
     
     func getSettings() -> [String: Any?]? {
@@ -2060,6 +2451,12 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         channelDelegate?.onLoadStop(url: url?.absoluteString)
         
         inAppBrowserDelegate?.didFinishNavigation(url: url)
+        
+        // GOTOK FORK: WebKit re-creates its long-press recognizer and VisionKit
+        // interactions per navigation; keep them disabled in picker mode.
+        if settings?.nativeImageContextMenuEnabled == true {
+            replaceGestureHandlerIfNeeded()
+        }
     }
     
     public func webView(_ view: WKWebView,
@@ -2751,11 +3148,9 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         channelDelegate?.onDidReceiveServerRedirectForProvisionalNavigation()
     }
     
-    // GOTOK FORK: native Chrome-on-WKWebView style long-press context menu for
-    // images. Gated by `nativeImageContextMenuEnabled` so other webviews keep
-    // their default behavior. The image src is resolved via a JS hit-test at the
-    // last touch point and selected actions are bridged to Dart through the
-    // standard JS bridge: window.flutter_inappwebview.callHandler('onWebImageAction', ...).
+    // GOTOK FORK: legacy WebKit context-menu fallback for image picking. The
+    // primary picker path now uses `nativeImageLongPressRecognizer` and sends
+    // `onWebImageContextMenu` over the plugin method channel.
     @available(iOS 13.0, *)
     public func webView(_ webView: WKWebView,
                         contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
@@ -2832,7 +3227,7 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         // The native lift already previews the image, and tapping it commits the
         // same "use" action (see willCommitWithAnimator).
         let actionProvider: UIContextMenuActionProvider = { [weak self] _ in
-            let use = UIAction(title: NSLocalizedString("Use this photo", comment: ""),
+            let use = UIAction(title: NSLocalizedString("Select image", comment: ""),
                                image: UIImage(systemName: "checkmark.circle")) { _ in
                 self?.sendWebImageAction("use", src: src)
             }
@@ -3658,6 +4053,8 @@ if(window.\(JavaScriptBridgeJS.get_JAVASCRIPT_BRIDGE_NAME())[\(_callHandlerID)] 
         recognizerForDisablingContextMenuOnLinks.removeTarget(self, action: #selector(longPressGestureDetected))
         recognizerForDisablingContextMenuOnLinks.delegate = nil
         scrollView.removeGestureRecognizer(recognizerForDisablingContextMenuOnLinks)
+        nativeImageLongPressRecognizer.onLongPress = nil
+        scrollView.removeGestureRecognizer(nativeImageLongPressRecognizer)
         panGestureRecognizer.removeTarget(self, action: #selector(endDraggingDetected))
         panGestureRecognizer.delegate = nil
         scrollView.removeGestureRecognizer(panGestureRecognizer)

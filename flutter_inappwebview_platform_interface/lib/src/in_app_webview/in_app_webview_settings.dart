@@ -1932,15 +1932,15 @@ as it can cause framerate drops on animations in Android 9 and lower (see [Hybri
 
   ///GOTOK FORK: Set to `true` to enable native-driven image long-press handling.
   ///
-  ///On iOS the long-press shows a native (Chrome-on-WKWebView style)
-  ///`UIContextMenuConfiguration` and the selected action is delivered to Dart
-  ///through the JS handler `onWebImageAction`.
+  ///On iOS the long-press is detected by a native `UILongPressGestureRecognizer`;
+  ///the pressed image src + bounding rect are delivered to Dart through the
+  ///registered `onWebImageContextMenu` handler so Flutter can render the preview.
   ///
   ///On Android the long-press on an `<img>` is detected natively, the element
   ///src + bounding rect are resolved via a JS hit-test at the touch point and
-  ///bridged to Dart through the JS handler `onWebImageContextMenu` (the gesture
-  ///is consumed so the default selection menu never fires). Flutter then renders
-  ///a context menu with preview anchored at the native rect.
+  ///bridged to Dart through the registered `onWebImageContextMenu` handler (the
+  ///gesture is consumed so the default selection menu never fires). Flutter then
+  ///renders a context menu with preview anchored at the native rect.
   ///The default value is `false`.
   @SupportedPlatforms(platforms: [IOSPlatform(), AndroidPlatform()])
   bool? nativeImageContextMenuEnabled;

@@ -60,10 +60,10 @@ public class InAppWebViewSettings implements ISettings<InAppWebViewInterface> {
   public Boolean disableHorizontalScroll = false;
   public Boolean disableContextMenu = false;
   // GOTOK FORK: when true, long-pressing an <img> is detected natively, the
-  // image src + element rect are resolved via a JS hit-test and bridged to Dart
-  // through callHandler('onWebImageContextMenu', ...). The long-press is consumed
-  // so Android's default selection/menu does not fire. Flutter then renders a
-  // Chrome-style context menu with preview anchored at the native rect.
+  // image src + element rect are resolved after the native gesture wins and
+  // bridged to Dart through the plugin method channel. The long-press is
+  // consumed so Android's default selection/menu does not fire. Flutter then
+  // renders a Chrome-style context menu with preview anchored at the native rect.
   public Boolean nativeImageContextMenuEnabled = false;
   public Boolean supportZoom = true;
   public Boolean allowFileAccessFromFileURLs = false;

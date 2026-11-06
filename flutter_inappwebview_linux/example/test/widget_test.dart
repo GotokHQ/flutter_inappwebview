@@ -11,17 +11,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_inappwebview_linux_example/main.dart';
 
 void main() {
-  testWidgets('Verify Platform version', (WidgetTester tester) async {
+  testWidgets('Renders the Linux InAppWebView test app', (
+    WidgetTester tester,
+  ) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(const MaterialApp(home: MyApp()));
 
-    // Verify that platform version is retrieved.
-    expect(
-      find.byWidgetPredicate(
-        (Widget widget) => widget is Text &&
-                           widget.data!.startsWith('Running on:'),
-      ),
-      findsOneWidget,
-    );
+    // Verify that the app's AppBar title is displayed.
+    expect(find.text('Linux InAppWebView Tests'), findsOneWidget);
   });
 }
