@@ -697,6 +697,15 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
                   + "img=best;}"
                   + "var target=img||bgNode;"
                   + "var src=img?srcOf(img):bgSrc;"
+                  // The app's picker script (when injected) decides whether the
+                  // press is on a video or its cover, and describes the video.
+                  + "var video=null;"
+                  + "try{var picker=window.__gotokPicker;"
+                  + "if(picker&&picker.longPress)video=picker.longPress(x,y,target,src);"
+                  + "}catch(e){video=null;}"
+                  + "if(video){return JSON.stringify({src:'',alt:video.alt||'',"
+                  + "x:video.x,y:video.y,width:video.width,height:video.height,"
+                  + "video:JSON.stringify(video)});}"
                   + "if(!target||!src){return null;}"
                   + "var r=target.getBoundingClientRect();"
                   + "return JSON.stringify({"
@@ -712,7 +721,10 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
                       ? (JSONObject) decoded
                       : new JSONObject((String) decoded);
               String src = json.optString("src", "");
-              if (src.isEmpty()) return;
+              // Video hits carry the picker script's description instead of
+              // an image src.
+              String video = json.optString("video", "");
+              if (src.isEmpty() && video.isEmpty()) return;
               performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
               Map<String, Object> obj = new HashMap<>();
               obj.put("src", src);
@@ -721,6 +733,7 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
               obj.put("y", json.optDouble("y", 0));
               obj.put("width", json.optDouble("width", 0));
               obj.put("height", json.optDouble("height", 0));
+              if (!video.isEmpty()) obj.put("video", video);
               channelDelegate.onWebImageContextMenu(obj);
             } catch (Exception ignored) {}
           });

@@ -573,6 +573,21 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             }
             var target = img || bgNode;
             var src = img ? srcOf(img) : bgSrc;
+            // The app's picker script (when injected) decides whether the
+            // press is on a video or its cover, and describes the video.
+            var video = null;
+            try {
+              var picker = window.__gotokPicker;
+              if (picker && picker.longPress) video = picker.longPress(x, y, target, src);
+            } catch (e) { video = null; }
+            if (video) {
+              return JSON.stringify({
+                src: '',
+                alt: video.alt || '',
+                x: video.x, y: video.y, width: video.width, height: video.height,
+                video: JSON.stringify(video)
+              });
+            }
             if (!target || !src) { return JSON.stringify({ src: null }); }
             var r = target.getBoundingClientRect();
             return JSON.stringify({
@@ -590,16 +605,21 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                 return
             }
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            self.sendNativeWebImageContextMenu(src: hit.src, alt: hit.alt, cssRect: hit.cssRect)
+            self.sendNativeWebImageContextMenu(src: hit.src, alt: hit.alt, cssRect: hit.cssRect, video: hit.video)
         }
     }
     
-    private func parseNativeImageHitTestResult(_ value: Any?) -> (src: String, alt: String, cssRect: CGRect)? {
+    /// `video` is the picker script's JSON description of a pressed video;
+    /// video hits carry no image `src`.
+    private func parseNativeImageHitTestResult(_ value: Any?) -> (src: String, alt: String, cssRect: CGRect, video: String?)? {
         guard let str = value as? String,
               let data = str.data(using: .utf8),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let src = obj["src"] as? String,
-              !src.isEmpty else {
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        let src = obj["src"] as? String ?? ""
+        let video = (obj["video"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        guard !src.isEmpty || video != nil else {
             return nil
         }
         let x = obj["x"] as? Double ?? 0
@@ -612,11 +632,12 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         return (
             src: src,
             alt: obj["alt"] as? String ?? "",
-            cssRect: CGRect(x: x, y: y, width: width, height: height)
+            cssRect: CGRect(x: x, y: y, width: width, height: height),
+            video: video
         )
     }
     
-    private func sendNativeWebImageContextMenu(src: String, alt: String, cssRect: CGRect) {
+    private func sendNativeWebImageContextMenu(src: String, alt: String, cssRect: CGRect, video: String? = nil) {
         let zoom = max(scrollView.zoomScale, 0.01)
         let viewRect = CGRect(
             x: cssRect.origin.x * zoom + scrollView.contentInset.left,
@@ -626,14 +647,18 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         )
         let clippedRect = viewRect.intersection(bounds)
         let rect = clippedRect.isEmpty ? viewRect : clippedRect
-        channelDelegate?.onWebImageContextMenu(arguments: [
+        var arguments: [String: Any?] = [
             "src": src,
             "alt": alt,
             "x": Double(rect.origin.x),
             "y": Double(rect.origin.y),
             "width": Double(rect.width),
             "height": Double(rect.height)
-        ])
+        ]
+        if let video = video {
+            arguments["video"] = video
+        }
+        channelDelegate?.onWebImageContextMenu(arguments: arguments)
     }
     
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
