@@ -41,6 +41,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
@@ -62,6 +63,9 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
@@ -2194,6 +2198,102 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
   @Override
   public void postWebMessage(com.pichillilorenzo.flutter_inappwebview_android.types.WebMessage message, Uri targetOrigin, ValueCallback<String> callback) throws Exception {
     throw new UnsupportedOperationException();
+  }
+
+  private final int[] windowInsetsLocationTmp = new int[2];
+
+  private static Insets clipInsetsToOverlap(
+      @NonNull Insets raw,
+      int gapLeft,
+      int gapTop,
+      int gapRight,
+      int gapBottom) {
+    return Insets.of(
+        Math.max(0, raw.left - gapLeft),
+        Math.max(0, raw.top - gapTop),
+        Math.max(0, raw.right - gapRight),
+        Math.max(0, raw.bottom - gapBottom));
+  }
+
+  /**
+   * Clips window insets to the portion that actually overlaps this WebView's bounds inside the root
+   * window, matching iOS UIKit {@code UIView.safeAreaInsets} propagation.
+   *
+   * <p>Android's default {@code ViewGroup.dispatchApplyWindowInsets} broadcasts full window system
+   * bar and IME insets to every child regardless of position. Under edge-to-edge (Android 15+) with
+   * Hybrid Composition, Chromium maps those raw insets directly to CSS {@code env(safe-area-inset-*)}
+   * even when Flutter chrome (a status-bar strip above or a bottom toolbar below) already sits
+   * between the WebView and the screen edge — causing {@code viewport-fit=cover} sites to add
+   * duplicate padding inside the page.
+   */
+  @Override
+  public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+    if (insets == null) {
+      return super.onApplyWindowInsets(null);
+    }
+    View root = getRootView();
+    if (root == null || getWidth() <= 0 || getHeight() <= 0 || root.getWidth() <= 0 || root.getHeight() <= 0) {
+      return super.onApplyWindowInsets(insets);
+    }
+
+    getLocationInWindow(windowInsetsLocationTmp);
+    int viewLeft = windowInsetsLocationTmp[0];
+    int viewTop = windowInsetsLocationTmp[1];
+    root.getLocationInWindow(windowInsetsLocationTmp);
+    int leftInRoot = viewLeft - windowInsetsLocationTmp[0];
+    int topInRoot = viewTop - windowInsetsLocationTmp[1];
+    int rightInRoot = leftInRoot + getWidth();
+    int bottomInRoot = topInRoot + getHeight();
+
+    int gapLeft = Math.max(0, leftInRoot);
+    int gapTop = Math.max(0, topInRoot);
+    int gapRight = Math.max(0, root.getWidth() - rightInRoot);
+    int gapBottom = Math.max(0, root.getHeight() - bottomInRoot);
+
+    if (gapLeft == 0 && gapTop == 0 && gapRight == 0 && gapBottom == 0) {
+      return super.onApplyWindowInsets(insets);
+    }
+
+    WindowInsetsCompat compat = WindowInsetsCompat.toWindowInsetsCompat(insets, this);
+    WindowInsetsCompat.Builder builder = new WindowInsetsCompat.Builder(compat);
+    int[] types = new int[] {
+        WindowInsetsCompat.Type.statusBars(),
+        WindowInsetsCompat.Type.navigationBars(),
+        WindowInsetsCompat.Type.captionBar(),
+        WindowInsetsCompat.Type.displayCutout(),
+        WindowInsetsCompat.Type.systemGestures(),
+        WindowInsetsCompat.Type.mandatorySystemGestures(),
+        WindowInsetsCompat.Type.tappableElement(),
+        WindowInsetsCompat.Type.ime()
+    };
+    for (int type : types) {
+      builder.setInsets(
+          type,
+          clipInsetsToOverlap(compat.getInsets(type), gapLeft, gapTop, gapRight, gapBottom));
+      if (type != WindowInsetsCompat.Type.ime()) {
+        builder.setInsetsIgnoringVisibility(
+            type,
+            clipInsetsToOverlap(
+                compat.getInsetsIgnoringVisibility(type), gapLeft, gapTop, gapRight, gapBottom));
+      }
+    }
+
+    WindowInsets clipped = builder.build().toWindowInsets();
+    return super.onApplyWindowInsets(clipped != null ? clipped : insets);
+  }
+
+  @Override
+  protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+    super.onSizeChanged(w, h, oldw, oldh);
+    if ((w != oldw || h != oldh) && isAttachedToWindow()) {
+      // Re-evaluate clipped safe-area / IME overlap whenever Flutter resizes the platform view
+      // (initial layout, toolbar show/hide, or keyboard resize).
+      post(() -> {
+        if (isAttachedToWindow()) {
+          ViewCompat.requestApplyInsets(this);
+        }
+      });
+    }
   }
 
   @Override
