@@ -765,6 +765,16 @@ public class WebViewChannelDelegate extends ChannelDelegateImpl {
     channel.invokeMethod("onScrollChanged", obj);
   }
 
+  public void onScrollChanged(int x, int y, double scrollRoomDp) {
+    MethodChannel channel = getChannel();
+    if (channel == null) return;
+    Map<String, Object> obj = new HashMap<>();
+    obj.put("x", x);
+    obj.put("y", y);
+    obj.put("scrollRoom", scrollRoomDp);
+    channel.invokeMethod("onScrollChanged", obj);
+  }
+
   public void onDownloadStarting(DownloadStartRequest downloadStartRequest) {
     MethodChannel channel = getChannel();
     if (channel == null) return;

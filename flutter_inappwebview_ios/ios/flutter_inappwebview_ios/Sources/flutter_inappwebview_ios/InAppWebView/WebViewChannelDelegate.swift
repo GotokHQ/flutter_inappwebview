@@ -729,8 +729,11 @@ public class WebViewChannelDelegate: ChannelDelegate {
         channel?.invokeMethod("onWebImageContextMenu", arguments: arguments)
     }
     
-    public func onScrollChanged(x: Int, y: Int) {
-        let arguments: [String: Any?] = ["x": x, "y": y]
+    public func onScrollChanged(x: Int, y: Int, scrollRoom: Double? = nil) {
+        var arguments: [String: Any?] = ["x": x, "y": y]
+        if let scrollRoom = scrollRoom {
+            arguments["scrollRoom"] = scrollRoom
+        }
         channel?.invokeMethod("onScrollChanged", arguments: arguments)
     }
     

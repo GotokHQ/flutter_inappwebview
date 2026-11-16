@@ -1045,6 +1045,15 @@ class InAppWebViewController {
   ///{@macro flutter_inappwebview_platform_interface.PlatformInAppWebViewController.getViewId.supported_platforms}
   dynamic getViewId() => platform.getViewId();
 
+  /// How far the page could still scroll vertically (`scrollRange -
+  /// viewportExtent`) as of the last scroll event, in logical pixels (dp on
+  /// Android, points on iOS).
+  ///
+  /// It is set before `onScrollChanged` is called, so a scroll handler can
+  /// read it without asking the page. `null` until the first scroll event,
+  /// and on platforms that do not report it.
+  double? get lastScrollRoomLogical => platform.lastScrollRoomLogical;
+
   ///{@macro flutter_inappwebview_platform_interface.PlatformInAppWebViewController.dispose}
   ///
   ///{@macro flutter_inappwebview_platform_interface.PlatformInAppWebViewController.dispose.supported_platforms}

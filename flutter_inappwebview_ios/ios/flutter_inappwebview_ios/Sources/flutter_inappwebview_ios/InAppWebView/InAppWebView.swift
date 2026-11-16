@@ -3042,7 +3042,10 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             (disableHorizontalScroll && scrollView.contentOffset.y != oldContentOffset?.y) {
             let x = Int(scrollView.contentOffset.x / scrollView.contentScaleFactor)
             let y = Int(scrollView.contentOffset.y / scrollView.contentScaleFactor)
-            channelDelegate?.onScrollChanged(x: x, y: y)
+            // How far the page can still scroll vertically, in points. Sent with every
+            // scroll event so Dart never has to ask the page for it mid-scroll.
+            let scrollRoom = Double(max(0, scrollView.contentSize.height - scrollView.bounds.height))
+            channelDelegate?.onScrollChanged(x: x, y: y, scrollRoom: scrollRoom)
         }
         lastScrollX = scrollView.contentOffset.x
         lastScrollY = scrollView.contentOffset.y

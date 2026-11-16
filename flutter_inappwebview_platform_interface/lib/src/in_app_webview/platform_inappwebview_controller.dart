@@ -154,6 +154,15 @@ abstract class PlatformInAppWebViewController extends PlatformInterface
   ///{@endtemplate}
   PlatformWebViewCreationParams? get webviewParams => params.webviewParams;
 
+  /// How far the page could still scroll vertically (`scrollRange -
+  /// viewportExtent`) as of the last scroll event, in logical pixels (dp on
+  /// Android, points on iOS).
+  ///
+  /// It is set before `onScrollChanged` is called, so a scroll handler can
+  /// read it without asking the page. `null` until the first scroll event,
+  /// and on platforms that do not report it.
+  double? get lastScrollRoomLogical => null;
+
   ///{@template flutter_inappwebview_platform_interface.PlatformInAppWebViewController.webStorage}
   ///Provides access to the JavaScript [Web Storage API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API): `window.sessionStorage` and `window.localStorage`.
   ///{@endtemplate}

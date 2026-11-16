@@ -34,11 +34,17 @@ android {
     }
 
     defaultConfig {
-        minSdkVersion 19
+        // 21 is the lowest API level the NDK can build the native library for.
+        minSdkVersion 21
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         vectorDrawables.useSupportLibrary = true
         consumerProguardFiles 'proguard-rules.pro'
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+        }
     }
     lintOptions {
         disable 'InvalidPackage'

@@ -73,6 +73,10 @@ class IOSInAppWebViewController extends PlatformInAppWebViewController
       _inAppBrowser?.eventHandler;
 
   dynamic _controllerFromPlatform;
+  double? _lastScrollRoomLogical;
+
+  @override
+  double? get lastScrollRoomLogical => _lastScrollRoomLogical;
 
   @override
   late IOSWebStorage webStorage;
@@ -373,6 +377,10 @@ class IOSInAppWebViewController extends PlatformInAppWebViewController
         }
         break;
       case "onScrollChanged":
+        final num? scrollRoom = call.arguments["scrollRoom"] as num?;
+        if (scrollRoom != null) {
+          _lastScrollRoomLogical = scrollRoom.toDouble();
+        }
         if ((webviewParams != null && webviewParams!.onScrollChanged != null) ||
             _inAppBrowserEventHandler != null) {
           int x = call.arguments["x"];

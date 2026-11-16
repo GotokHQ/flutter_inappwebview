@@ -144,6 +144,8 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
   public boolean isLoading = false;
   private boolean inFullscreen = false;
   public float zoomScale = 1.0f;
+  // Identifies this view to FastScrollBridge; 0 means scroll events use the MethodChannel.
+  public long fastScrollToken = 0L;
   public ContentBlockerHandler contentBlockerHandler = new ContentBlockerHandler();
   @Nullable
   public GestureDetector gestureDetector = null;
@@ -1570,7 +1572,23 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
       floatingContextMenu.setVisibility(View.GONE);
     }
 
-    if (channelDelegate != null) channelDelegate.onScrollChanged(x, y);
+    // How far the page can still scroll vertically, in dp. Sent with every scroll event so
+    // Dart never has to ask the page for it mid-scroll.
+    float density = getResources().getDisplayMetrics().density;
+    if (density <= 0f) {
+      density = 1f;
+    }
+    float scrollRoomDp =
+        Math.max(0, computeVerticalScrollRange() - computeVerticalScrollExtent()) / density;
+
+    // Synchronous delivery when Dart runs on this thread; otherwise the MethodChannel.
+    if (FastScrollBridge.dispatchScroll(fastScrollToken, x, y, scrollRoomDp)) {
+      return;
+    }
+
+    if (channelDelegate != null) {
+      channelDelegate.onScrollChanged(x, y, scrollRoomDp);
+    }
   }
 
   public void scrollTo(Integer x, Integer y, Boolean animated) {
@@ -2340,6 +2358,7 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
 
   @Override
   public void dispose() {
+    fastScrollToken = 0L;
     if (channelDelegate != null) {
       channelDelegate.dispose();
       channelDelegate = null;

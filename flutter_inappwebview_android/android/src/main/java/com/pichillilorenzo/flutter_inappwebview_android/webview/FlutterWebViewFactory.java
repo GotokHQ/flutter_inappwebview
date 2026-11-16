@@ -71,6 +71,14 @@ public class FlutterWebViewFactory extends PlatformViewFactory {
       inAppWebViewManager.keepAliveWebViews.put(keepAliveId, flutterWebView);
     }
 
+    // Set here rather than in FlutterWebView so a kept-alive WebView picks up the token of
+    // the widget it is being re-attached to. No token: scroll events use the MethodChannel.
+    if (flutterWebView.webView != null) {
+      Object rawFastScrollToken = params != null ? params.get("fastScrollToken") : null;
+      flutterWebView.webView.fastScrollToken =
+          rawFastScrollToken instanceof Number ? ((Number) rawFastScrollToken).longValue() : 0L;
+    }
+
     if (shouldMakeInitialLoad) {
       flutterWebView.makeInitialLoad(params);
     }

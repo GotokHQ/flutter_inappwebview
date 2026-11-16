@@ -8,6 +8,7 @@ import 'package:flutter_inappwebview_platform_interface/flutter_inappwebview_pla
 
 import '../find_interaction/find_interaction_controller.dart';
 import '../pull_to_refresh/pull_to_refresh_controller.dart';
+import '_fast_scroll_bridge.dart';
 import 'headless_in_app_webview.dart';
 import 'in_app_webview_controller.dart';
 
@@ -340,6 +341,7 @@ class AndroidInAppWebViewWidget extends PlatformInAppWebViewWidget {
             );
           },
       onCreatePlatformView: (PlatformViewCreationParams params) {
+        final int fastScrollToken = AndroidFastScrollBridge.allocateToken();
         return _createAndroidViewController(
             hybridComposition: useHybridComposition,
             id: params.id,
@@ -366,10 +368,14 @@ class AndroidInAppWebViewWidget extends PlatformInAppWebViewWidget {
                   [],
               'pullToRefreshSettings': pullToRefreshSettings,
               'keepAliveId': this.params.keepAlive?.id,
+              if (fastScrollToken > 0) 'fastScrollToken': fastScrollToken,
             },
           )
           ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
-          ..addOnPlatformViewCreatedListener((id) => _onPlatformViewCreated(id))
+          ..addOnPlatformViewCreatedListener(
+            (id) =>
+                _onPlatformViewCreated(id, fastScrollToken: fastScrollToken),
+          )
           ..create();
       },
     );
@@ -400,17 +406,22 @@ class AndroidInAppWebViewWidget extends PlatformInAppWebViewWidget {
     );
   }
 
-  void _onPlatformViewCreated(int id) {
+  void _onPlatformViewCreated(int id, {int fastScrollToken = 0}) {
     dynamic viewId = id;
     if (params.headlessWebView?.isRunning() ?? false) {
       viewId = params.headlessWebView?.id;
     }
     viewId = params.keepAlive?.id ?? viewId ?? id;
     _androidHeadlessInAppWebView?.internalDispose();
+    // A previous controller keeps everything else it owns (keep-alive state
+    // is shared with the next one); only its scroll registration must not
+    // outlive it.
+    _controller?.releaseFastScroll();
     _controller = AndroidInAppWebViewController(
-      PlatformInAppWebViewControllerCreationParams(
+      AndroidInAppWebViewControllerCreationParams(
         id: viewId,
         webviewParams: params,
+        fastScrollToken: fastScrollToken,
       ),
     );
     _androidParams.pullToRefreshController?.init(viewId);

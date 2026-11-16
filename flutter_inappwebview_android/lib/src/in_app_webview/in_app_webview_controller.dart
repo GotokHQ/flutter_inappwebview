@@ -12,6 +12,7 @@ import '../in_app_browser/in_app_browser.dart';
 import '../print_job/main.dart';
 import '../web_message/main.dart';
 import '../web_storage/web_storage.dart';
+import '_fast_scroll_bridge.dart';
 import '_static_channel.dart';
 import 'headless_in_app_webview.dart';
 
@@ -27,7 +28,10 @@ class AndroidInAppWebViewControllerCreationParams
   const AndroidInAppWebViewControllerCreationParams({
     required super.id,
     super.webviewParams,
+    this.fastScrollToken = 0,
   });
+
+  final int fastScrollToken;
 
   /// Creates a [AndroidInAppWebViewControllerCreationParams] instance based on [PlatformInAppWebViewControllerCreationParams].
   factory AndroidInAppWebViewControllerCreationParams.fromPlatformInAppWebViewControllerCreationParams(
@@ -71,6 +75,11 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
       _inAppBrowser?.eventHandler;
 
   dynamic _controllerFromPlatform;
+  int _fastScrollToken = 0;
+  double? _lastScrollRoomLogical;
+
+  @override
+  double? get lastScrollRoomLogical => _lastScrollRoomLogical;
 
   @override
   late AndroidWebStorage webStorage;
@@ -151,6 +160,15 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
   void _init(PlatformInAppWebViewControllerCreationParams params) {
     _controllerFromPlatform =
         params.webviewParams?.controllerFromPlatform?.call(this) ?? this;
+
+    // Only the embedded widget hands its native WebView a token (through the
+    // platform view creation params). Headless and InAppBrowser controllers
+    // have none and keep receiving scroll events over the MethodChannel.
+    if (params is AndroidInAppWebViewControllerCreationParams &&
+        params.fastScrollToken > 0) {
+      _fastScrollToken = params.fastScrollToken;
+      AndroidFastScrollBridge.register(_fastScrollToken, _onFastScroll);
+    }
 
     webStorage = AndroidWebStorage(
       AndroidWebStorageCreationParams(
@@ -372,6 +390,10 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
         }
         break;
       case "onScrollChanged":
+        final num? scrollRoom = call.arguments["scrollRoom"] as num?;
+        if (scrollRoom != null) {
+          _lastScrollRoomLogical = scrollRoom.toDouble();
+        }
         if ((webviewParams != null && webviewParams!.onScrollChanged != null) ||
             _inAppBrowserEventHandler != null) {
           int x = call.arguments["x"];
@@ -3241,8 +3263,27 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
     return id;
   }
 
+  // Same event as the "onScrollChanged" MethodChannel case, delivered
+  // synchronously by [AndroidFastScrollBridge].
+  void _onFastScroll(int x, int y, double scrollRoomDp) {
+    _lastScrollRoomLogical = scrollRoomDp;
+    if (webviewParams != null && webviewParams!.onScrollChanged != null) {
+      webviewParams!.onScrollChanged!(_controllerFromPlatform, x, y);
+    } else if (_inAppBrowserEventHandler != null) {
+      _inAppBrowserEventHandler!.onScrollChanged(x, y);
+    }
+  }
+
+  void _releaseFastScroll() {
+    if (_fastScrollToken > 0) {
+      AndroidFastScrollBridge.unregister(_fastScrollToken);
+      _fastScrollToken = 0;
+    }
+  }
+
   @override
   void dispose({bool isKeepAlive = false}) {
+    _releaseFastScroll();
     disposeChannel(removeMethodCallHandler: !isKeepAlive);
     _inAppBrowser = null;
     webStorage.dispose();
@@ -3266,4 +3307,8 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
 
 extension InternalInAppWebViewController on AndroidInAppWebViewController {
   get handleMethod => _handleMethod;
+
+  /// Stops synchronous scroll delivery to this controller without disposing
+  /// anything else.
+  void releaseFastScroll() => _releaseFastScroll();
 }
